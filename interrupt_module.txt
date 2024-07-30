@@ -1,0 +1,183 @@
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/interrupt.h>
+#include <asm/io.h>
+#include <linux/init.h>
+#include <linux/errno.h>
+#include <linux/proc_fs.h>
+#include <asm/uaccess.h>
+#include <linux/tty.h>
+#include <linux/sched.h>
+#include <linux/workqueue.h>
+
+MODULE_LICENSE("GPL");
+
+struct interrupt_test_t {
+    char data;
+};
+
+#define INTERRUPT_TEST _IOR(0,6,struct interrupt_test_t)
+
+static struct proc_dir_entry *proc_entry;
+static struct file_operations pseudo_dev_proc_operations;
+static struct workqueue_struct *my_workqueue;
+
+static int begin_add = 0; // Add characters when first ioctl call
+static char last_key; // Read key to ioctl
+
+
+static char get_char_from_scan_code(unsigned char scan_code, int shift_pressed) {
+    switch (scan_code) {
+        case 0x1e: return shift_pressed ? 'A' : 'a';
+        case 0x30: return shift_pressed ? 'B' : 'b';
+        case 0x2e: return shift_pressed ? 'C' : 'c';
+        case 0x20: return shift_pressed ? 'D' : 'd';
+        case 0x12: return shift_pressed ? 'E' : 'e';
+        case 0x21: return shift_pressed ? 'F' : 'f';
+        case 0x22: return shift_pressed ? 'G' : 'g';
+        case 0x23: return shift_pressed ? 'H' : 'h';
+        case 0x17: return shift_pressed ? 'I' : 'i';
+        case 0x24: return shift_pressed ? 'J' : 'j';
+        case 0x25: return shift_pressed ? 'K' : 'k';
+        case 0x26: return shift_pressed ? 'L' : 'l';
+        case 0x32: return shift_pressed ? 'M' : 'm';
+        case 0x31: return shift_pressed ? 'N' : 'n';
+        case 0x18: return shift_pressed ? 'O' : 'o';
+        case 0x19: return shift_pressed ? 'P' : 'p';
+        case 0x10: return shift_pressed ? 'Q' : 'q';
+        case 0x13: return shift_pressed ? 'R' : 'r';
+        case 0x1f: return shift_pressed ? 'S' : 's';
+        case 0x14: return shift_pressed ? 'T' : 't';
+        case 0x16: return shift_pressed ? 'U' : 'u';
+        case 0x2f: return shift_pressed ? 'V' : 'v';
+        case 0x11: return shift_pressed ? 'W' : 'w';
+        case 0x2d: return shift_pressed ? 'X' : 'x';
+        case 0x15: return shift_pressed ? 'Y' : 'y';
+        case 0x2c: return shift_pressed ? 'Z' : 'z';
+        case 0x02: return shift_pressed ? '!' : '1';
+        case 0x03: return shift_pressed ? '@' : '2';
+        case 0x04: return shift_pressed ? '#' : '3';
+        case 0x05: return shift_pressed ? '$' : '4';
+        case 0x06: return shift_pressed ? '%' : '5';
+        case 0x07: return shift_pressed ? '^' : '6';
+        case 0x08: return shift_pressed ? '&' : '7';
+        case 0x09: return shift_pressed ? '*' : '8';
+        case 0x0a: return shift_pressed ? '(' : '9';
+        case 0x0b: return shift_pressed ? ')' : '0';
+        case 0x1c: return '\n';
+        case 0x39: return ' ';
+        case 0x0f: return '\t';
+        case 0x1a: return '[';
+        case 0x1b: return ']';
+        case 0x2b: return '\\';
+        case 0x27: return ';';
+        case 0x0e: return '\b';
+        case 0x38: return 'Ctrl';
+        case 0x0c: return '-';
+        case 0x4e: return '-';
+        default: return '\0'; 
+    }
+}
+
+/* 'printk' version that prints to the active tty. */
+void my_printk(char *string)
+{
+    struct tty_struct *my_tty;
+
+    my_tty = current->signal->tty;
+
+    if (my_tty != NULL) {
+        (*my_tty->driver->ops->write)(my_tty, string, strlen(string));
+        (*my_tty->driver->ops->write)(my_tty, "\015\012", 2);
+    }
+}
+
+static void got_char(struct work_struct *work)
+{
+    char *scancode = container_of(work, struct work_struct, func);
+}
+
+static int shift_pressed = 0; 
+
+irqreturn_t irq_handler(unsigned int irq, void *dev_id, struct pt_regs *regs)
+{
+    unsigned char status, scancode, key;
+
+    status = inb(0x64);
+    scancode = inb(0x60);
+    if (scancode == 0x2A) { // Scancode is pressing shift key
+        shift_pressed = 1;
+        return IRQ_HANDLED; 
+    } else if (scancode == 0xAA) { // Scancode is releasing shift key
+        shift_pressed = 0;
+        return IRQ_HANDLED; 
+    }
+
+    key = get_char_from_scan_code(scancode, shift_pressed);
+    
+    if (key != '\0') { 
+        printk(KERN_INFO "IRQ Handler: Status=%x, Scancode=%x, Key=%c\n", status, scancode, key);
+        if (begin_add){
+            last_key = key;
+        }
+        static struct work_struct task;
+        INIT_WORK(&task, got_char);
+        queue_work(my_workqueue, &task);
+    }
+
+    return IRQ_HANDLED;
+}
+
+static int pseudo_device_ioctl(struct inode *inode, struct file *file,
+                unsigned int cmd, unsigned long arg)
+{
+    switch (cmd) {
+        case INTERRUPT_TEST:
+                begin_add = 1;
+                if (last_key != NULL) {
+                    struct interrupt_test_t data;
+                    data.data = last_key;
+                    last_key = NULL;
+                    int err = copy_to_user((struct interrupt_test_t __user *)arg, &data, sizeof(struct interrupt_test_t));
+                    return 1;
+                }
+                break;
+        default:
+            return -EINVAL;
+    }
+}
+
+
+static int __init initialization_routine(void)
+{
+    printk(KERN_INFO "Initializing module...\n");
+
+    pseudo_dev_proc_operations.ioctl= pseudo_device_ioctl;
+
+    // Initialize the workqueue
+    my_workqueue = create_workqueue("my_workqueue");
+
+    // Create the /proc entry
+    proc_entry = proc_create("interrupt_test", 0444, NULL, &pseudo_dev_proc_operations);
+    printk(KERN_INFO "Proc entry created.\n");
+
+    // Request IRQ - share with current keyboard
+    int result = request_irq(1, irq_handler, IRQF_SHARED, "my_keyboard", "my_keyboard");
+
+    return 0;
+}
+
+static void __exit cleanup_routine(void)
+{
+    printk(KERN_INFO "Cleaning up module.\n");
+
+    // Free the IRQ after usage
+    free_irq(1, "my_keyboard");
+
+    // Remove the /proc entry
+    remove_proc_entry("interrupt_test", NULL);
+
+}
+
+module_init(initialization_routine);
+module_exit(cleanup_routine);

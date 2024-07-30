@@ -1,0 +1,37 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <linux/ioctl.h>
+
+struct interrupt_test_t {
+    char data;
+};
+
+#define INTERRUPT_TEST _IOR(0, 6, struct interrupt_test_t)
+
+// ANSI escape codes for text colors
+#define ANSI_COLOR_GREEN   "\x1b[32m"
+#define ANSI_COLOR_RESET   "\x1b[0m"
+
+int main() {
+    int fd = open("/proc/interrupt_test", O_RDONLY);
+    if (fd == -1) {
+        perror("Failed to open /proc/interrupt_test");
+        return 1;
+    }
+
+    struct interrupt_test_t data;
+    ssize_t bytes_read;
+
+    while (1) {
+        bytes_read = ioctl(fd, INTERRUPT_TEST, &data);
+        if (bytes_read == 1){  
+            printf(ANSI_COLOR_GREEN "%c" ANSI_COLOR_RESET, data.data);
+            fflush(stdout);
+        }
+    }
+
+    close(fd);
+    return 0;
+}
